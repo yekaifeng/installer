@@ -40,3 +40,13 @@ variable "root_volume_type" {
   type        = string
   description = "The type of volume for the root block device."
 }
+
+variable "server_group_name" {
+  type        = string
+  description = "Name of the server group for the master nodes."
+}
+
+variable "additional_network_ids" {
+  type        = list(string)
+  description = "IDs of additional networks for master nodes."
+}

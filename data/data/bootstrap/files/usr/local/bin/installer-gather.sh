@@ -21,7 +21,7 @@ done
 
 echo "Gathering bootstrap journals ..."
 mkdir -p "${ARTIFACTS}/bootstrap/journals"
-for service in release-image crio-configure bootkube kubelet crio approve-csr
+for service in release-image crio-configure bootkube kubelet crio approve-csr ironic master-update-bmh
 do
     journalctl --boot --no-pager --output=short --unit="${service}" > "${ARTIFACTS}/bootstrap/journals/${service}.log"
 done
@@ -119,10 +119,7 @@ if [ "$#" -ne 0 ]; then
 elif test -s "${ARTIFACTS}/resources/masters.list"; then
     mapfile -t MASTERS < "${ARTIFACTS}/resources/masters.list"
 else
-    # Find out master IPs from etcd discovery record
-    DOMAIN=$(sudo oc --kubeconfig=/opt/openshift/auth/kubeconfig whoami --show-server | grep -oP "api.\\K([a-z\\.]*)")
-    dig -t SRV "_etcd-server-ssl._tcp.${DOMAIN}" +short | cut -f 4 -d ' ' | sed 's/.$//' >"${ARTIFACTS}/resources/masters.list"
-    mapfile -t MASTERS < "${ARTIFACTS}/resources/masters.list"
+    echo "No masters found!"
 fi
 
 for master in "${MASTERS[@]}"

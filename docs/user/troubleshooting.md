@@ -77,6 +77,8 @@ The most important thing to look at on the bootstrap node is `bootkube.service`.
 1. If SSH is available, the following command can be run on the bootstrap node: `journalctl --unit=bootkube.service`
 2. Regardless of whether or not SSH is available, the following command can be run: `curl --insecure --cert ${INSTALL_DIR}/tls/journal-gatewayd.crt --key ${INSTALL_DIR}/tls/journal-gatewayd.key 'https://${BOOTSTRAP_IP}:19531/entries?follow&_SYSTEMD_UNIT=bootkube.service'`
 
+The installer can also gather a log bundle from the bootstrap host using SSH as describe in [troubleshooting bootstrap](./troubleshootingbootstrap.md) document.
+
 ### etcd Is Not Running
 
 During the bootstrap process, the Kubelet may emit errors like the following:
@@ -293,12 +295,12 @@ The installer fetches the URL for OpenShift console using the [route][route-obje
   console-openshift-console.apps.adahiya-1.devcluster.openshift.com
   ```
 
-### Installer Fails to Add Route CA to Kubeconfig
+### Installer Fails to Add Default Ingress Certificate to Kubeconfig
 
-The installer adds the CA certificate for the router to the list of trusted client certificate authorities in `${INSTALL_DIR}/auth/kubeconfig`. If the installer fails to add the router CA to `kubeconfig`, you can fetch the router CA from the cluster using:
+The installer adds the default ingress certificate to the list of trusted client certificate authorities in `${INSTALL_DIR}/auth/kubeconfig`. If the installer fails to add the ingress certificate to `kubeconfig`, you can fetch the certificate from the cluster using the following command:
 
 ```console
-$ oc --kubeconfig=${INSTALL_DIR}/auth/kubeconfig get configmaps router-ca -n openshift-config-managed -o=jsonpath='{.data.ca-bundle\.crt}'
+$ oc --kubeconfig=${INSTALL_DIR}/auth/kubeconfig get configmaps default-ingress-cert -n openshift-config-managed -o=jsonpath='{.data.ca-bundle\.crt}'
 -----BEGIN CERTIFICATE-----
 MIIC/TCCAeWgAwIBAgIBATANBgkqhkiG9w0BAQsFADAuMSwwKgYDVQQDDCNjbHVz
 dGVyLWluZ3Jlc3Mtb3BlcmF0b3JAMTU1MTMwNzU4OTAeFw0xOTAyMjcyMjQ2Mjha

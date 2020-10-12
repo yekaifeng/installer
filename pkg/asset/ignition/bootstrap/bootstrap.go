@@ -23,6 +23,7 @@ import (
 	"github.com/openshift/installer/pkg/asset"
 	"github.com/openshift/installer/pkg/asset/ignition"
 	"github.com/openshift/installer/pkg/asset/ignition/bootstrap/baremetal"
+	"github.com/openshift/installer/pkg/asset/ignition/bootstrap/vsphere"
 	"github.com/openshift/installer/pkg/asset/installconfig"
 	"github.com/openshift/installer/pkg/asset/kubeconfig"
 	"github.com/openshift/installer/pkg/asset/machines"
@@ -32,6 +33,7 @@ import (
 	"github.com/openshift/installer/pkg/asset/tls"
 	"github.com/openshift/installer/pkg/types"
 	baremetaltypes "github.com/openshift/installer/pkg/types/baremetal"
+	vspheretypes "github.com/openshift/installer/pkg/types/vsphere"
 )
 
 const (
@@ -59,6 +61,7 @@ type bootstrapTemplateData struct {
 // template files that are specific to one platform.
 type platformTemplateData struct {
 	BareMetal *baremetal.TemplateData
+	VSphere   *vsphere.TemplateData
 }
 
 // Bootstrap is an asset that generates the ignition config for bootstrap nodes.
@@ -87,6 +90,7 @@ func (a *Bootstrap) Dependencies() []asset.Asset {
 		&tls.AggregatorClientCertKey{},
 		&tls.AggregatorSignerCertKey{},
 		&tls.APIServerProxyCertKey{},
+		&tls.BootstrapSSHKeyPair{},
 		&tls.EtcdCABundle{},
 		&tls.EtcdMetricCABundle{},
 		&tls.EtcdMetricSignerCertKey{},
@@ -132,7 +136,8 @@ func (a *Bootstrap) Generate(dependencies asset.Parents) error {
 	proxy := &manifests.Proxy{}
 	releaseImage := &releaseimage.Image{}
 	rhcosImage := new(rhcos.Image)
-	dependencies.Get(installConfig, proxy, releaseImage, rhcosImage)
+	bootstrapSSHKeyPair := &tls.BootstrapSSHKeyPair{}
+	dependencies.Get(installConfig, proxy, releaseImage, rhcosImage, bootstrapSSHKeyPair)
 
 	templateData, err := a.getTemplateData(installConfig.Config, releaseImage.PullSpec, installConfig.Config.ImageContentSources, proxy.Config, rhcosImage)
 
@@ -181,7 +186,10 @@ func (a *Bootstrap) Generate(dependencies asset.Parents) error {
 
 	a.Config.Passwd.Users = append(
 		a.Config.Passwd.Users,
-		igntypes.PasswdUser{Name: "core", SSHAuthorizedKeys: []igntypes.SSHAuthorizedKey{igntypes.SSHAuthorizedKey(installConfig.Config.SSHKey)}},
+		igntypes.PasswdUser{Name: "core", SSHAuthorizedKeys: []igntypes.SSHAuthorizedKey{
+			igntypes.SSHAuthorizedKey(installConfig.Config.SSHKey),
+			igntypes.SSHAuthorizedKey(string(bootstrapSSHKeyPair.Public())),
+		}},
 	)
 
 	data, err := json.Marshal(a.Config)
@@ -232,12 +240,14 @@ func (a *Bootstrap) getTemplateData(installConfig *types.InstallConfig, releaseI
 		registries = append(registries, registry)
 	}
 
-	// Generate platform-specific baremetal data
+	// Generate platform-specific bootstrap data
 	var platformData platformTemplateData
 
 	switch installConfig.Platform.Name() {
 	case baremetaltypes.Name:
 		platformData.BareMetal = baremetal.GetTemplateData(installConfig.Platform.BareMetal)
+	case vspheretypes.Name:
+		platformData.VSphere = vsphere.GetTemplateData(installConfig.Platform.VSphere)
 	}
 
 	return &bootstrapTemplateData{
@@ -321,9 +331,10 @@ func (a *Bootstrap) addSystemdUnits(uri string, templateData *bootstrapTemplateD
 		"systemd-journal-gatewayd.socket": {},
 		"approve-csr.service":             {},
 		// baremetal & openstack platform services
-		"keepalived.service": {},
-		"coredns.service":    {},
-		"ironic.service":     {},
+		"keepalived.service":        {},
+		"coredns.service":           {},
+		"ironic.service":            {},
+		"master-bmh-update.service": {},
 	}
 
 	directory, err := data.Assets.Open(uri)

@@ -8,32 +8,37 @@ aliases:
     - smarterclayton
     - wking
   installer-reviewers:
-    - fabianofranz
-    - jcpowermac
     - jhixson74
     - jstuever
     - mtnbikenc
     - patrickdillon
   libvirt-approvers:
-    - abhinavdahiya
-    - enxebre
     - praveenkumar
-    - zeenix
+    - cfergeau
   libvirt-reviewers:
+    - praveenkumar
+    - cfergeau
   openstack-approvers:
     - Fedosin
-    - mandre
-    - tomassedovic
+    - adduarte
     - iamemilio
+    - mandre
     - pierreprinetti
   openstack-reviewers:
+    - Fedosin
+    - adduarte
+    - iamemilio
+    - mandre
+    - pierreprinetti
   vsphere-approvers:
-    - abhinavdahiya
     - dav1x
     - mtnbikenc
     - jcpowermac
-    - staebler
+    - patrickdillon
   vsphere-reviewers:
+    - mtnbikenc
+    - jcpowermac
+    - patrickdillon
   baremetal-approvers:
     - hardys
     - stbenjam
@@ -47,11 +52,28 @@ aliases:
     - jstuever
     - patrickdillon
   aws-reviewers:
+    - jstuever
+    - patrickdillon
   gcp-approvers:
     - jstuever
     - patrickdillon
   gcp-reviewers:
+    - jstuever
+    - patrickdillon
   azure-approvers:
     - fabianofranz
     - jhixson74
   azure-reviewers:
+    - asalkeld
+    - ehashman
+    - fabianofranz
+    - jhixson74
+    - jim-minter
+    - mjudeikis
+  ovirt-approvers:
+    - rgolangh
+  ovirt-reviewers:
+    - dougsland
+    - Gal-Zaidman
+    - gekorob
+    - rgolangh

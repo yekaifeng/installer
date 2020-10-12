@@ -1,4 +1,3 @@
-// Package openstack provides a cluster-destroyer for openstack clusters.
 package openstack
 
 import (
@@ -10,10 +9,12 @@ import (
 
 	"github.com/gophercloud/gophercloud"
 	"github.com/gophercloud/gophercloud/openstack/blockstorage/v3/volumes"
+	"github.com/gophercloud/gophercloud/openstack/compute/v2/extensions/servergroups"
 	"github.com/gophercloud/gophercloud/openstack/compute/v2/servers"
 	"github.com/gophercloud/gophercloud/openstack/imageservice/v2/images"
 	"github.com/gophercloud/gophercloud/openstack/loadbalancer/v2/apiversions"
 	"github.com/gophercloud/gophercloud/openstack/loadbalancer/v2/loadbalancers"
+	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/attributestags"
 	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/layer3/floatingips"
 	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/layer3/routers"
 	sg "github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/security/groups"
@@ -25,6 +26,7 @@ import (
 	"github.com/gophercloud/gophercloud/openstack/objectstorage/v1/containers"
 	"github.com/gophercloud/gophercloud/openstack/objectstorage/v1/objects"
 	"github.com/gophercloud/utils/openstack/clientconfig"
+	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
@@ -59,22 +61,41 @@ type ClusterUninstaller struct {
 	Cloud string
 	// Filter contains the openshiftClusterID to filter tags
 	Filter Filter
-	Logger logrus.FieldLogger
+	// InfraID contains unique cluster identifier
+	InfraID string
+	Logger  logrus.FieldLogger
 }
 
 // New returns an OpenStack destroyer from ClusterMetadata.
 func New(logger logrus.FieldLogger, metadata *types.ClusterMetadata) (providers.Destroyer, error) {
 	return &ClusterUninstaller{
-		Cloud:  metadata.ClusterPlatformMetadata.OpenStack.Cloud,
-		Filter: metadata.ClusterPlatformMetadata.OpenStack.Identifier,
-		Logger: logger,
+		Cloud:   metadata.ClusterPlatformMetadata.OpenStack.Cloud,
+		Filter:  metadata.ClusterPlatformMetadata.OpenStack.Identifier,
+		InfraID: metadata.InfraID,
+		Logger:  logger,
 	}, nil
 }
 
 // Run is the entrypoint to start the uninstall process.
 func (o *ClusterUninstaller) Run() error {
-	deleteFuncs := map[string]deleteFunc{}
-	populateDeleteFuncs(deleteFuncs)
+	// deleteFuncs contains the functions that will be launched as
+	// goroutines.
+	deleteFuncs := map[string]deleteFunc{
+		"deleteServers":        deleteServers,
+		"deleteServerGroups":   deleteServerGroups,
+		"deleteTrunks":         deleteTrunks,
+		"deleteLoadBalancers":  deleteLoadBalancers,
+		"deletePorts":          deletePorts,
+		"deleteSecurityGroups": deleteSecurityGroups,
+		"deleteRouters":        deleteRouters,
+		"deleteSubnets":        deleteSubnets,
+		"deleteSubnetPools":    deleteSubnetPools,
+		"deleteNetworks":       deleteNetworks,
+		"deleteContainers":     deleteContainers,
+		"deleteVolumes":        deleteVolumes,
+		"deleteFloatingIPs":    deleteFloatingIPs,
+		"deleteImages":         deleteImages,
+	}
 	returnChannel := make(chan string)
 
 	opts := &clientconfig.ClientOpts{
@@ -92,6 +113,12 @@ func (o *ClusterUninstaller) Run() error {
 		case res := <-returnChannel:
 			o.Logger.Debugf("goroutine %v complete", res)
 		}
+	}
+
+	// we need to untag the custom network if it was provided by the user
+	err := untagRunner(opts, o.InfraID, o.Logger)
+	if err != nil {
+		return err
 	}
 
 	return nil
@@ -115,24 +142,6 @@ func deleteRunner(deleteFuncName string, dFunction deleteFunc, opts *clientconfi
 	// record that the goroutine has run to completion
 	channel <- deleteFuncName
 	return
-}
-
-// populateDeleteFuncs is the list of functions that will be launched as
-// goroutines.
-func populateDeleteFuncs(funcs map[string]deleteFunc) {
-	funcs["deleteServers"] = deleteServers
-	funcs["deleteTrunks"] = deleteTrunks
-	funcs["deleteLoadBalancers"] = deleteLoadBalancers
-	funcs["deletePorts"] = deletePorts
-	funcs["deleteSecurityGroups"] = deleteSecurityGroups
-	funcs["deleteRouters"] = deleteRouters
-	funcs["deleteSubnets"] = deleteSubnets
-	funcs["deleteSubnetPools"] = deleteSubnetPools
-	funcs["deleteNetworks"] = deleteNetworks
-	funcs["deleteContainers"] = deleteContainers
-	funcs["deleteVolumes"] = deleteVolumes
-	funcs["deleteFloatingIPs"] = deleteFloatingIPs
-	funcs["deleteImages"] = deleteImages
 }
 
 // filterObjects will do client-side filtering given an appropriately filled out
@@ -233,6 +242,61 @@ func deleteServers(opts *clientconfig.ClientOpts, filter Filter, logger logrus.F
 		}
 	}
 	return len(filteredServers) == 0, nil
+}
+
+func deleteServerGroups(opts *clientconfig.ClientOpts, filter Filter, logger logrus.FieldLogger) (bool, error) {
+	logger.Debug("Deleting openstack server groups")
+	defer logger.Debugf("Exiting deleting openstack server groups")
+
+	// We need to delete all server groups that have names with the cluster
+	// ID as a prefix
+	var clusterID string
+	for k, v := range filter {
+		if strings.ToLower(k) == "openshiftclusterid" {
+			clusterID = v
+			break
+		}
+	}
+
+	conn, err := clientconfig.NewServiceClient("compute", opts)
+	if err != nil {
+		logger.Error(err)
+		return false, nil
+	}
+
+	allPages, err := servergroups.List(conn).AllPages()
+	if err != nil {
+		logger.Error(err)
+		return false, nil
+	}
+
+	allServerGroups, err := servergroups.ExtractServerGroups(allPages)
+	if err != nil {
+		logger.Error(err)
+		return false, nil
+	}
+
+	filteredGroups := make([]servergroups.ServerGroup, 0, len(allServerGroups))
+	for _, serverGroup := range allServerGroups {
+		if strings.HasPrefix(serverGroup.Name, clusterID) {
+			filteredGroups = append(filteredGroups, serverGroup)
+		}
+	}
+
+	for _, serverGroup := range filteredGroups {
+		logger.Debugf("Deleting Server Group %q", serverGroup.ID)
+		if err = servergroups.Delete(conn, serverGroup.ID).ExtractErr(); err != nil {
+			// Ignore the error if the server cannot be found and
+			// return with an appropriate message if it's another
+			// type of error
+			if _, ok := err.(gophercloud.ErrDefault404); !ok {
+				logger.Errorf("Deleting server group %q failed: %v", serverGroup.ID, err)
+				return false, nil
+			}
+			logger.Debugf("Cannot find server group %q. It's probably already been deleted.", serverGroup.ID)
+		}
+	}
+	return len(filteredGroups) == 0, nil
 }
 
 func deletePorts(opts *clientconfig.ClientOpts, filter Filter, logger logrus.FieldLogger) (bool, error) {
@@ -648,6 +712,10 @@ func deleteTrunks(opts *clientconfig.ClientOpts, filter Filter, logger logrus.Fi
 	}
 	allPages, err := trunks.List(conn, listOpts).AllPages()
 	if err != nil {
+		if _, ok := err.(gophercloud.ErrDefault404); ok {
+			logger.Debug("Skip trunk deletion because the cloud doesn't support trunk ports")
+			return true, nil
+		}
 		logger.Error(err)
 		return false, nil
 	}
@@ -939,5 +1007,70 @@ func deleteImages(opts *clientconfig.ClientOpts, filter Filter, logger logrus.Fi
 			return false, nil
 		}
 	}
+	return true, nil
+}
+
+func untagRunner(opts *clientconfig.ClientOpts, infraID string, logger logrus.FieldLogger) error {
+	backoffSettings := wait.Backoff{
+		Duration: time.Second * 10,
+		Steps:    25,
+	}
+
+	err := wait.ExponentialBackoff(backoffSettings, func() (bool, error) {
+		return untagPrimaryNetwork(opts, infraID, logger)
+	})
+	if err != nil {
+		if err == wait.ErrWaitTimeout {
+			return err
+		}
+		return errors.Errorf("Unrecoverable error: %v", err)
+	}
+
+	return nil
+}
+
+// untagNetwork removes the tag from the primary cluster network based on unfra id
+func untagPrimaryNetwork(opts *clientconfig.ClientOpts, infraID string, logger logrus.FieldLogger) (bool, error) {
+	networkTag := infraID + "-primaryClusterNetwork"
+
+	logger.Debugf("Removing tag %v from openstack networks", networkTag)
+	defer logger.Debug("Exiting untagging openstack networks")
+
+	conn, err := clientconfig.NewServiceClient("network", opts)
+	if err != nil {
+		logger.Debug(err)
+		return false, nil
+	}
+
+	listOpts := networks.ListOpts{
+		Tags: networkTag,
+	}
+
+	allPages, err := networks.List(conn, listOpts).AllPages()
+	if err != nil {
+		logger.Debug(err)
+		return false, nil
+	}
+
+	allNetworks, err := networks.ExtractNetworks(allPages)
+	if err != nil {
+		logger.Debug(err)
+		return false, nil
+	}
+
+	if len(allNetworks) > 1 {
+		return false, errors.Errorf("More than one network with tag %v", networkTag)
+	}
+
+	if len(allNetworks) == 0 {
+		// The network has already been deleted.
+		return true, nil
+	}
+
+	err = attributestags.Delete(conn, "networks", allNetworks[0].ID, networkTag).ExtractErr()
+	if err != nil {
+		return false, nil
+	}
+
 	return true, nil
 }

@@ -12,6 +12,9 @@ This provides a greater flexibility at the cost of a more explicit and interacti
 
 Below is a step-by-step guide to a UPI installation that mimics an automated IPI installation; prerequisites and steps described below should be adapted to the constraints of the target infrastructure.
 
+Please be aware of the [Known Issues](known-issues.md#known-issues-specific-to-user-provisioned-installations)
+of this method of installation.
+
 ## Table of Contents
 
 * [Prerequisites](#prerequisites)
@@ -29,7 +32,6 @@ Below is a step-by-step guide to a UPI installation that mimics an automated IPI
 * [Ignition Config](#ignition-config)
   * [Infra ID](#infra-id)
   * [Bootstrap Ignition](#bootstrap-ignition)
-    * [Glance Authentication](#glance-authentication)
   * [Master Ignition](#master-ignition)
 * [Network Topology](#network-topology)
   * [Security Groups](#security-groups)
@@ -91,9 +93,9 @@ This repository contains [Ansible playbooks][ansible-upi] to deploy OpenShift on
 * Python
 * Ansible
 * Python modules required in the playbooks. Namely:
+  * openstackclient
   * openstacksdk
   * netaddr
-  * openstackclient
 
 ### RHEL
 
@@ -233,7 +235,6 @@ The installer added a default IP range for the OpenShift nodes. It must match th
 
 We're going to use a custom subnet to illustrate how that can be done.
 
-
 Our range will be `192.0.2.0/24` so we need to add that value to
 `install-config.yaml`. Look under `networking` -> `machineNetwork` -> network -> `cidr`.
 
@@ -350,7 +351,9 @@ Remove the control-plane Machines and compute MachineSets, because we'll be prov
 ```sh
 $ rm -f openshift/99_openshift-cluster-api_master-machines-*.yaml openshift/99_openshift-cluster-api_worker-machineset-*.yaml
 ```
-You are free to leave the compute MachineSets in if you want to create compute machines via the machine API, but if you do you may need to update the various references (`subnet`, etc.) to match your environment.
+Leave the compute MachineSets in if you want to create compute machines via the machine API. However, some references must be updated in the machineset spec (`openshift/99_openshift-cluster-api_worker-machineset-0.yaml`) to match your environment:
+
+* The OS image: `spec.template.spec.providerSpec.value.image`
 
 [mao]: https://github.com/openshift/machine-api-operator
 
@@ -408,69 +411,164 @@ Make sure your shell session has the `$INFRA_ID` environment variable set when y
 
 ### Bootstrap Ignition
 
-The generated boostrap ignition file (`bootstrap.ign`) tends to be quite large (around 300KB -- it contains all the manifests, master and worker ignitions etc.). This is generally too big to be passed to the server directly (the OpenStack Nova user data limit is 64KB).
+#### Edit the Bootstrap Ignition
+
+We need to set the bootstrap hostname explicitly, and in the case of OpenStack using self-signed certificate, the CA cert file. The IPI installer does this automatically, but for now UPI does not.
+
+We will update the ignition file (`bootstrap.ign`) to create the following files:
+
+**`/etc/hostname`**:
+
+```plaintext
+openshift-qlvwv-bootstrap
+```
+
+(using the `infraID`)
+
+**`/opt/openshift/tls/cloud-ca-cert.pem`** (if applicable).
+
+**NOTE**: We recommend you back up the Ignition files before making any changes!
+
+You can edit the Ignition file manually or run this Python script:
+
+```python
+import base64
+import json
+import os
+
+with open('bootstrap.ign', 'r') as f:
+    ignition = json.load(f)
+
+files = ignition['storage'].get('files', [])
+
+infra_id = os.environ.get('INFRA_ID', 'openshift').encode()
+hostname_b64 = base64.standard_b64encode(infra_id + b'-bootstrap\n').decode().strip()
+files.append(
+{
+    'path': '/etc/hostname',
+    'mode': 420,
+    'contents': {
+        'source': 'data:text/plain;charset=utf-8;base64,' + hostname_b64,
+        'verification': {}
+    },
+    'filesystem': 'root',
+})
+
+ca_cert_path = os.environ.get('OS_CACERT', '')
+if ca_cert_path:
+    with open(ca_cert_path, 'r') as f:
+        ca_cert = f.read().encode()
+        ca_cert_b64 = base64.standard_b64encode(ca_cert).decode().strip()
+
+    files.append(
+    {
+        'path': '/opt/openshift/tls/cloud-ca-cert.pem',
+        'mode': 420,
+        'contents': {
+            'source': 'data:text/plain;charset=utf-8;base64,' + ca_cert_b64,
+            'verification': {}
+        },
+        'filesystem': 'root',
+    })
+
+ignition['storage']['files'] = files;
+
+with open('bootstrap.ign', 'w') as f:
+    json.dump(ignition, f)
+```
+
+Feel free to make any other changes.
+
+#### Upload the Boostrap Ignition
+
+The generated boostrap ignition file tends to be quite large (around 300KB -- it contains all the manifests, master and worker ignitions etc.). This is generally too big to be passed to the server directly (the OpenStack Nova user data limit is 64KB).
 
 To boot it up, we will create a smaller Ignition file that will be passed to Nova as user data and that will download the main ignition file upon execution.
 
 The main file needs to be uploaded to an HTTP(S) location the Bootstrap node will be able to access.
 
-You are free to choose any storage you want. For example:
+Choose the storage that best fits your needs and availability.
 
-* Swift Object Storage
-  Create the `<container_name>` container and upload the `bootstrap.ign` file:
+**IMPORTANT**: The `bootstrap.ign` contains sensitive information such as your `clouds.yaml` credentials. It should not be accessible by the public! It will only be used once during the Nova boot of the Bootstrap server. We strongly recommend you restrict the access to that server only and delete the file afterwards.
 
-  ```sh
-  $ swift upload <container_name> bootstrap.ign
-  ```
+Possible choices include:
 
-  Make the container accessible:
-
-  ```sh
-  $ swift post <container_name> --read-acl ".r:*,.rlistings"
-  ```
-
-  Get the `storage_url` from the output:
-
-  ```sh
-  $ swift stat -v
-  ```
-
-* Glance image service
-
-  Create the `<image_name>` image and upload the `bootstrap.ign` file:
-
-  ```sh
-  $ openstack image create --disk-format=raw --container-format=bare --file bootstrap.ign <image_name>
-  ```
-
-  **NOTE**: Make sure the created image has `active` status.
-
-  Copy and save `file` value of the output, it should look like `/v2/images/<image_id>/file`.
-
-  Get Glance public URL:
-
-  ```sh
-  $ openstack catalog show image
-  ```
-
-  Combine the public URL with the `file` value from the previous step to get the link to your bootstrap ignition.
-  Example of the link: `https://public.glance.example.com:9292/v2/images/b7e2b84e-15cf-440a-a113-3197518da024/file`.
-
-* Amazon S3
-
-* Internal HTTP server inside your organisation
-
-* A short-lived Nova server in `$INFRA_ID-nodes` hosting the file for bootstrapping
+* Swift (see Example 1 below);
+* Glance (see Example 2 below);
+* Amazon S3;
+* Internal web server inside your organisation;
+* A throwaway Nova server in `$INFRA_ID-nodes` hosting a static web server exposing the file.
 
 In this guide, we will assume the file is at the following URL:
 
 https://static.example.com/bootstrap.ign
 
-**NOTE**: In case the Swift object storage option was chosen the URL will have the following format: `<storage_url>/<container_name>/bootstrap.ign`. For Glance it is `<glance_public_url>/v2/images/<image_id>/file`.
+##### Example 1: Swift
 
-**IMPORTANT**: The `bootstrap.ign` contains sensitive information such as your `clouds.yaml` credentials and TLS certificates. It should **not** be accessible by the public! It will only be used once during the Nova boot of the Bootstrap server. We strongly recommend you restrict the access to that server only and delete the file afterwards.
+The `swift` client is needed for enabling listing on the container.
 
-### Bootstrap Ignition Shim
+Create the `<container_name>` container and upload the `bootstrap.ign` file:
+
+```sh
+$ swift upload <container_name> bootstrap.ign
+```
+
+Make the container accessible:
+
+```sh
+$ swift post <container_name> --read-acl ".r:*,.rlistings"
+```
+
+Get the `storage_url` from the output:
+
+```sh
+$ swift stat -v
+```
+
+The URL to be put in the `source` property of the Ignition Shim (see below) will have the following format: `<storage_url>/<container_name>/bootstrap.ign`.
+
+##### Example 2: Glance image service
+
+Create the `<image_name>` image and upload the `bootstrap.ign` file:
+
+```sh
+$ openstack image create --disk-format=raw --container-format=bare --file bootstrap.ign <image_name>
+```
+
+**NOTE**: Make sure the created image has `active` status.
+
+Copy and save `file` value of the output, it should look like `/v2/images/<image_id>/file`.
+
+Get Glance public URL:
+
+```sh
+$ openstack catalog show image
+```
+
+By default Glance service doesn't allow anonymous access to the data. So, if you use Glance to store the ignition config, then you also need to provide a valid auth token in the `ignition.config.append.httpHeaders` field.
+
+To obtain the token execute:
+
+```sh
+openstack token issue -c id -f value
+```
+
+The command will return the token to be added to the `ignition.config.append[0].httpHeaders` property in the Bootstrap Ignition Shim (see [below](#create-the-bootstrap-ignition-shim)):
+
+```json
+"httpHeaders": [
+	{
+		"name": "X-Auth-Token",
+		"value": "<token>"
+	}
+]
+```
+
+Combine the public URL with the `file` value to get the link to your bootstrap ignition, in the format `<glance_public_url>/v2/images/<image_id>/file`.
+
+Example of the link to be put in the `source` property of the Ignition Shim (see below): `https://public.glance.example.com:9292/v2/images/b7e2b84e-15cf-440a-a113-3197518da024/file`.
+
+### Create the Bootstrap Ignition Shim
 
 As mentioned before due to Nova user data size limit, we will need to create a new Ignition file that will load the bulk of the Bootstrap node configuration. This will be similar to the existing `master.ign` and `worker.ign` files.
 
@@ -501,49 +599,24 @@ Create a file called `$INFRA_ID-bootstrap-ignition.json` (fill in your `infraID`
 
 Change the `ignition.config.append.source` field to the URL hosting the `bootstrap.ign` file you've uploaded previously.
 
-#### Glance Authentication
+#### Ignition file served by server using self-signed certificate
 
-By default Glance service doesn't allow anonymous access to the data. So, if you use Glance to store the ignition config, then you also need to provide a valid auth token in the `ignition.config.append.httpHeaders` field.
-
-To obtain the token execute:
-
-```sh
-openstack token issue -c id -f value
-```
-
-Add a new entity to the list of http headers:
-
-```json
-{
-  "httpHeaders": [
-    {
-      "name": "X-Auth-Token",
-      "value": "<token_id>"
-    }
-  ]
-}
-```
-
-The result shim config should look like:
+In order for the bootstrap node to retrieve the ignition file when it is served by a server using self-signed certificate, it is necessary to add the CA certificate to the `ignition.security.tls.certificateAuthorities` in the ignition file. For instance:
 
 ```json
 {
   "ignition": {
-    "config": {
-      "append": [
-        {
-          "source": "https://public.glance.example.com:9292/v2/images/b7e2b84e-15cf-440a-a113-3197518da024/file",
-          "verification": {},
-          "httpHeaders": [
-            {
-              "name": "X-Auth-Token",
-              "value": "46b30a6a00d654f4af0fc5bb8b8413f1"
-            }
-          ]
-        }
-      ]
+    "config": {},
+    "security": {
+      "tls": {
+        "certificateAuthorities": [
+          {
+            "source": "data:text/plain;charset=utf-8;base64,<base64_encoded_certificate>",
+            "verification": {}
+          }
+        ]
+      }
     },
-    "security": {},
     "timeouts": {},
     "version": "2.4.0"
   },
@@ -553,55 +626,6 @@ The result shim config should look like:
   "systemd": {}
 }
 ```
-
-### Update Bootstrap Ignition
-
-We need to set the bootstrap hostname explicitly. The IPI installer does this automatically, but for now UPI does not.
-
-We will update the ignition to create the following file:
-
-**`/etc/hostname`**:
-
-```plaintext
-openshift-qlvwv-bootstrap
-```
-
-(using the `infraID`)
-
-**NOTE**: We recommend you back up the Ignition files before making any changes!
-
-You can edit the Ignition file manually or run this Python script:
-
-```python
-import base64
-import json
-import os
-
-with open('bootstrap.ign', 'r') as f:
-    ignition = json.load(f)
-
-files = ignition['storage'].get('files', [])
-
-infra_id = os.environ.get('INFRA_ID', 'openshift').encode()
-hostname_b64 = base64.standard_b64encode(infra_id + b'-bootstrap\n').decode().strip()
-files.append(
-{
-    'path': '/etc/hostname',
-    'mode': 420,
-    'contents': {
-        'source': 'data:text/plain;charset=utf-8;base64,' + hostname_b64,
-        'verification': {}
-    },
-    'filesystem': 'root',
-})
-
-ignition['storage']['files'] = files;
-
-with open('bootstrap.ign', 'w') as f:
-    json.dump(ignition, f)
-```
-
-Feel free to make any other changes.
 
 ### Master Ignition
 
@@ -638,7 +662,7 @@ In this section we'll create all the networking pieces necessary to host the Ope
 ### Security Groups
 
 ```sh
-$ ansible-playbook -i inventory.yaml 01_security-groups.yaml
+$ ansible-playbook -i inventory.yaml security-groups.yaml
 ```
 
 The playbook creates one Security group for the Control Plane and one for the Compute nodes, then attaches rules for enabling communication between the nodes.
@@ -646,7 +670,7 @@ The playbook creates one Security group for the Control Plane and one for the Co
 ### Network, Subnet and external router
 
 ```sh
-$ ansible-playbook -i inventory.yaml 02_network.yaml
+$ ansible-playbook -i inventory.yaml network.yaml
 ```
 
 The playbook creates a network and a subnet. The subnet obeys `os_subnet_range`; however the first ten IP addresses are removed from the allocation pool. These addresses will be used for the VRRP addresses managed by keepalived for high availability. For more information, read the [networking infrastructure design document][net-infra].
@@ -674,7 +698,7 @@ $ openstack subnet set --dns-nameserver <198.51.100.86> --dns-nameserver <198.51
 ## Bootstrap
 
 ```sh
-$ ansible-playbook -i inventory.yaml 03_bootstrap.yaml
+$ ansible-playbook -i inventory.yaml bootstrap.yaml
 ```
 
 The playbook sets the *allowed address pairs* on each port attached to our OpenShift nodes.
@@ -699,7 +723,7 @@ $ ssh core@203.0.113.24
 ## Control Plane
 
 ```sh
-$ ansible-playbook -i inventory.yaml 04_control-plane.yaml
+$ ansible-playbook -i inventory.yaml control-plane.yaml
 ```
 
 Our control plane will consist of three nodes. The servers will be passed the `master-?-ignition.json` files prepared earlier.
@@ -752,7 +776,7 @@ $ oc get pods -A
 ### Delete the Bootstrap Resources
 
 ```sh
-$ ansible-playbook -i inventory.yaml down-03_bootstrap.yaml
+$ ansible-playbook -i inventory.yaml down-bootstrap.yaml
 ```
 
 The teardown playbook deletes the bootstrap port, server and floating IP address.
@@ -762,11 +786,10 @@ If you haven't done so already, you should also disable the bootstrap Ignition U
 ## Compute Nodes
 
 ```sh
-$ ansible-playbook -i inventory.yaml 05_compute-nodes.yaml
+$ ansible-playbook -i inventory.yaml compute-nodes.yaml
 ```
 
 This process is similar to the masters, but the workers need to be approved before they're allowed to join the cluster.
-
 
 The workers need no ignition override.
 
@@ -868,14 +891,17 @@ Upon success, it will print the URL to the OpenShift Console (the web UI) as wel
 
 ```sh
 $ ansible-playbook -i inventory.yaml  \
-	down-06_load-balancers.yaml \
-	down-05_compute-nodes.yaml  \
-	down-04_control-plane.yaml  \
-	down-03_bootstrap.yaml      \
-	down-02_network.yaml        \
-	down-01_security-groups.yaml
+	down-bootstrap.yaml      \
+	down-control-plane.yaml  \
+	down-compute-nodes.yaml  \
+	down-load-balancers.yaml \
+	down-network.yaml        \
+	down-security-groups.yaml
 ```
 
-The playbook `down-06_load-balancers.yaml` idempotently deletes the load balancers created by the Kuryr installation, if any.
+The playbook `down-load-balancers.yaml` idempotently deletes the load balancers created by the Kuryr installation, if any.
+
+**NOTE:** The deletion of load balancers with `provisioning_status` `PENDING-*` is skipped. Make sure to retry the
+`down-load-balancers.yaml` playbook once the load balancers have transitioned to `ACTIVE`.
 
 Then, remove the `api` and `*.apps` DNS records.

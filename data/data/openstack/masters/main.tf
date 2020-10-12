@@ -36,6 +36,11 @@ resource "openstack_blockstorage_volume_v3" "master_volume" {
   image_id = var.base_image_id
 }
 
+resource "openstack_compute_servergroup_v2" "master_group" {
+  name = var.server_group_name
+  policies = ["soft-anti-affinity"]
+}
+
 resource "openstack_compute_instance_v2" "master_conf" {
   name = "${var.cluster_id}-master-${count.index}"
   count = var.instance_count
@@ -61,6 +66,18 @@ resource "openstack_compute_instance_v2" "master_conf" {
 
   network {
     port = var.master_port_ids[count.index]
+  }
+
+  scheduler_hints {
+    group = openstack_compute_servergroup_v2.master_group.id
+  }
+
+  dynamic network {
+    for_each = var.additional_network_ids
+
+    content {
+      uuid = network.value
+    }
   }
 
   metadata = {

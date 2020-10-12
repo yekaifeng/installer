@@ -97,13 +97,31 @@ func validBareMetalPlatform() *baremetal.Platform {
 		ProvisioningNetworkCIDR:      ipnet.MustParseCIDR("192.168.111.0/24"),
 		BootstrapProvisioningIP:      "192.168.111.1",
 		ClusterProvisioningIP:        "192.168.111.2",
-		Hosts:                        []*baremetal.Host{},
-		ExternalBridge:               iface[0].Name,
-		ProvisioningBridge:           iface[0].Name,
-		DefaultMachinePlatform:       &baremetal.MachinePool{},
-		APIVIP:                       "10.0.0.5",
-		IngressVIP:                   "10.0.0.4",
-		DNSVIP:                       "10.0.0.2",
+		Hosts: []*baremetal.Host{
+			{
+				Name:           "host1",
+				BootMACAddress: "CA:FE:CA:FE:00:00",
+				BMC: baremetal.BMC{
+					Username: "root",
+					Password: "password",
+					Address:  "ipmi://192.168.111.1",
+				},
+			},
+			{
+				Name:           "host2",
+				BootMACAddress: "CA:FE:CA:FE:00:01",
+				BMC: baremetal.BMC{
+					Username: "root",
+					Password: "password",
+					Address:  "ipmi://192.168.111.2",
+				},
+			},
+		},
+		ExternalBridge:         iface[0].Name,
+		ProvisioningBridge:     iface[0].Name,
+		DefaultMachinePlatform: &baremetal.MachinePool{},
+		APIVIP:                 "10.0.0.5",
+		IngressVIP:             "10.0.0.4",
 	}
 }
 
@@ -187,6 +205,9 @@ func validOvirtPlatform() *ovirt.Platform {
 	return &ovirt.Platform{
 		ClusterID:       uuid.NewRandom().String(),
 		StorageDomainID: uuid.NewRandom().String(),
+		APIVIP:          "1.1.1.1",
+		DNSVIP:          "1.1.1.2",
+		IngressVIP:      "1.1.1.3",
 	}
 }
 
@@ -470,7 +491,7 @@ func TestValidateInstallConfig(t *testing.T) {
 				}
 				return c
 			}(),
-			expectedError: `^compute\[0\]\.platform\.openstack: Invalid value: openstack\.MachinePool{FlavorName:"", RootVolume:\(\*openstack\.RootVolume\)\(nil\)}: cannot specify "openstack" for machine pool when cluster is using "aws"$`,
+			expectedError: `^compute\[0\]\.platform\.openstack: Invalid value: openstack\.MachinePool{.*}: cannot specify "openstack" for machine pool when cluster is using "aws"$`,
 		},
 		{
 			name: "missing platform",
@@ -499,7 +520,7 @@ func TestValidateInstallConfig(t *testing.T) {
 				}
 				return c
 			}(),
-			expectedError: `^platform\.aws\.region: Unsupported value: "": supported values: "ap-northeast-1", "ap-northeast-2", "ap-south-1", "ap-southeast-1", "ap-southeast-2", "ca-central-1", "eu-central-1", "eu-north-1", "eu-west-1", "eu-west-2", "eu-west-3", "me-south-1", "sa-east-1", "us-east-1", "us-east-2", "us-west-1", "us-west-2"$`,
+			expectedError: `^platform\.aws\.region: Required value: region must be specified$`,
 		},
 		{
 			name: "valid libvirt platform",
@@ -603,30 +624,6 @@ func TestValidateInstallConfig(t *testing.T) {
 			expectedError: `^platform\.baremetal\.apiVIP: Invalid value: "10\.1\.0\.5": the virtual IP is expected to be in one of the machine networks$`,
 		},
 		{
-			name: "baremetal DNS VIP not an IP",
-			installConfig: func() *types.InstallConfig {
-				c := validInstallConfig()
-				c.Platform = types.Platform{
-					BareMetal: validBareMetalPlatform(),
-				}
-				c.Platform.BareMetal.DNSVIP = "test"
-				return c
-			}(),
-			expectedError: `^\[platform\.baremetal\.dnsVIP: Invalid value: "test": "test" is not a valid IP, platform\.baremetal\.dnsVIP: Invalid value: "test": the virtual IP is expected to be in one of the machine networks]$`,
-		},
-		{
-			name: "baremetal DNS VIP set to an incorrect value",
-			installConfig: func() *types.InstallConfig {
-				c := validInstallConfig()
-				c.Platform = types.Platform{
-					BareMetal: validBareMetalPlatform(),
-				}
-				c.Platform.BareMetal.DNSVIP = "10.1.0.6"
-				return c
-			}(),
-			expectedError: `^platform\.baremetal\.dnsVIP: Invalid value: "10\.1\.0\.6": the virtual IP is expected to be in one of the machine networks$`,
-		},
-		{
 			name: "baremetal Ingress VIP not an IP",
 			installConfig: func() *types.InstallConfig {
 				c := validInstallConfig()
@@ -670,6 +667,18 @@ func TestValidateInstallConfig(t *testing.T) {
 				return c
 			}(),
 			expectedError: `^platform\.vsphere.vCenter: Required value: must specify the name of the vCenter$`,
+		},
+		{
+			name: "invalid vsphere folder",
+			installConfig: func() *types.InstallConfig {
+				c := validInstallConfig()
+				c.Platform = types.Platform{
+					VSphere: validVSpherePlatform(),
+				}
+				c.Platform.VSphere.Folder = "my-folder"
+				return c
+			}(),
+			expectedError: `^platform\.vsphere.folder: Invalid value: \"my-folder\": folder must be absolute path: expected prefix /test-datacenter/vm/$`,
 		},
 		{
 			name: "empty proxy settings",
@@ -906,7 +915,61 @@ func TestValidateInstallConfig(t *testing.T) {
 				return c
 			}(),
 		},
-		// TODO(crawford): add a test to validate that homogeneous clusters are enforced once an additional architecture is added
+		{
+			name: "cluster is not heteregenous",
+			installConfig: func() *types.InstallConfig {
+				c := validInstallConfig()
+				c.Compute[0].Architecture = types.ArchitectureS390X
+				return c
+			}(),
+			expectedError: `^compute\[0\].architecture: Invalid value: "s390x": heteregeneous multi-arch is not supported; compute pool architecture must match control plane$`,
+		},
+		{
+			name: "cluster is not heteregenous",
+			installConfig: func() *types.InstallConfig {
+				c := validInstallConfig()
+				c.Compute[0].Architecture = types.ArchitecturePPC64LE
+				return c
+			}(),
+			expectedError: `^compute\[0\].architecture: Invalid value: "ppc64le": heteregeneous multi-arch is not supported; compute pool architecture must match control plane$`,
+		},
+		{
+			name: "valid cloud credentials mode",
+			installConfig: func() *types.InstallConfig {
+				c := validInstallConfig()
+				c.CredentialsMode = types.PassthroughCredentialsMode
+				return c
+			}(),
+		},
+		{
+			name: "unsupported manual cloud credentials mode",
+			installConfig: func() *types.InstallConfig {
+				c := validInstallConfig()
+				c.Platform = types.Platform{GCP: validGCPPlatform()}
+				c.CredentialsMode = types.ManualCredentialsMode
+				return c
+			}(),
+			expectedError: `^credentialsMode: Unsupported value: "Manual": supported values: "Mint", "Passthrough"$`,
+		},
+		{
+			name: "invalidly set cloud credentials mode",
+			installConfig: func() *types.InstallConfig {
+				c := validInstallConfig()
+				c.Platform = types.Platform{BareMetal: validBareMetalPlatform()}
+				c.CredentialsMode = types.PassthroughCredentialsMode
+				return c
+			}(),
+			expectedError: `^credentialsMode: Invalid value: "Passthrough": cannot be set when using the "baremetal" platform$`,
+		},
+		{
+			name: "bad cloud credentials mode",
+			installConfig: func() *types.InstallConfig {
+				c := validInstallConfig()
+				c.CredentialsMode = "bad-mode"
+				return c
+			}(),
+			expectedError: `^credentialsMode: Unsupported value: "bad-mode": supported values: "Manual", "Mint", "Passthrough"$`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -8,6 +8,7 @@ locals {
 }
 
 provider "azurerm" {
+  features {}
   subscription_id = var.azure_subscription_id
   client_id       = var.azure_client_id
   client_secret   = var.azure_client_secret
@@ -37,7 +38,7 @@ module "bootstrap" {
   ilb_backend_pool_v6_id = module.vnet.internal_lb_backend_pool_v6_id
   tags                   = local.tags
   storage_account        = azurerm_storage_account.cluster
-  nsg_name               = module.vnet.master_nsg_name
+  nsg_name               = module.vnet.cluster_nsg_name
   private                = module.vnet.private
 
   use_ipv4                  = var.use_ipv4 || var.azure_emulate_single_stack_ipv6
@@ -48,8 +49,8 @@ module "bootstrap" {
 module "vnet" {
   source              = "./vnet"
   resource_group_name = azurerm_resource_group.main.name
-  vnet_v4_cidrs       = var.azure_machine_v4_cidrs
-  vnet_v6_cidrs       = var.azure_machine_v6_cidrs
+  vnet_v4_cidrs       = var.machine_v4_cidrs
+  vnet_v6_cidrs       = var.machine_v6_cidrs
   cluster_id          = var.cluster_id
   region              = var.azure_region
   dns_label           = var.cluster_id
@@ -76,7 +77,6 @@ module "master" {
   vm_image               = azurerm_image.cluster.id
   identity               = azurerm_user_assigned_identity.main.id
   ignition               = var.ignition_master
-  external_lb_id         = module.vnet.public_lb_id
   elb_backend_pool_v4_id = module.vnet.public_lb_backend_pool_v4_id
   elb_backend_pool_v6_id = module.vnet.public_lb_backend_pool_v6_id
   ilb_backend_pool_v4_id = module.vnet.internal_lb_backend_pool_v4_id
@@ -105,9 +105,6 @@ module "dns" {
   internal_lb_ipaddress_v6        = module.vnet.internal_lb_ip_v6_address
   resource_group_name             = azurerm_resource_group.main.name
   base_domain_resource_group_name = var.azure_base_domain_resource_group_name
-  etcd_count                      = var.master_count
-  etcd_ip_v4_addresses            = module.master.ip_v4_addresses
-  etcd_ip_v6_addresses            = module.master.ip_v6_addresses
   private                         = module.vnet.private
 
   use_ipv4                  = var.use_ipv4 || var.azure_emulate_single_stack_ipv6
@@ -165,16 +162,14 @@ resource "azurerm_role_assignment" "network" {
 # copy over the vhd to cluster resource group and create an image using that
 resource "azurerm_storage_container" "vhd" {
   name                 = "vhd"
-  resource_group_name  = azurerm_resource_group.main.name
   storage_account_name = azurerm_storage_account.cluster.name
 }
 
 resource "azurerm_storage_blob" "rhcos_image" {
   name                   = "rhcos${random_string.storage_suffix.result}.vhd"
-  resource_group_name    = azurerm_resource_group.main.name
   storage_account_name   = azurerm_storage_account.cluster.name
   storage_container_name = azurerm_storage_container.vhd.name
-  type                   = "block"
+  type                   = "Block"
   source_uri             = var.azure_image_url
   metadata               = map("source_uri", var.azure_image_url)
 }

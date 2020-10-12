@@ -307,6 +307,12 @@ variable "openstack_external_dns" {
   default     = []
 }
 
+variable "openstack_additional_network_ids" {
+  type        = list(string)
+  description = "IDs of additional networks for master nodes."
+  default     = []
+}
+
 variable "openstack_master_flavor_name" {
   type        = string
   description = "Instance size for the master node(s). Example: `m1.medium`."
@@ -328,4 +334,21 @@ variable "openstack_octavia_support" {
 Contains 0 if the OpenStack Octavia endpoint is missing and 1 if it exists.
 EOF
 
+}
+
+variable "openstack_master_server_group_name" {
+  type        = string
+  description = "Name of the server group for the master nodes."
+}
+
+variable "openstack_machines_subnet_id" {
+  type        = string
+  default     = ""
+  description = "ID of the subnet to use for cluster machines. If empty, the installer will create a subnet to use as machinesSubnet."
+}
+
+variable "openstack_machines_network_id" {
+  type        = string
+  default     = ""
+  description = "ID of the network the machines subnet is on. If empty, the installer will create a network to use as machinesNetwork."
 }

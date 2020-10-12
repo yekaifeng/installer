@@ -14,7 +14,6 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -33,6 +32,7 @@ import (
 	assetstore "github.com/openshift/installer/pkg/asset/store"
 	targetassets "github.com/openshift/installer/pkg/asset/targets"
 	destroybootstrap "github.com/openshift/installer/pkg/destroy/bootstrap"
+	timer "github.com/openshift/installer/pkg/metrics/timer"
 	"github.com/openshift/installer/pkg/types/baremetal"
 	cov1helpers "github.com/openshift/library-go/pkg/config/clusteroperator/v1helpers"
 )
@@ -97,6 +97,7 @@ var (
 					logrus.Fatal(errors.Wrap(err, "loading kubeconfig"))
 				}
 
+				timer.StartTimer("Bootstrap Complete")
 				err = waitForBootstrapComplete(ctx, config, rootOpts.dir)
 				if err != nil {
 					if err2 := logClusterOperatorConditions(ctx, config); err2 != nil {
@@ -107,6 +108,8 @@ var (
 					}
 					logrus.Fatal("Bootstrap failed to complete: ", err)
 				}
+				timer.StopTimer("Bootstrap Complete")
+				timer.StartTimer("Bootstrap Destroy")
 
 				if oi, ok := os.LookupEnv("OPENSHIFT_INSTALL_PRESERVE_BOOTSTRAP"); ok && oi != "" {
 					logrus.Warn("OPENSHIFT_INSTALL_PRESERVE_BOOTSTRAP is set, not destroying bootstrap resources. " +
@@ -118,6 +121,7 @@ var (
 						logrus.Fatal(err)
 					}
 				}
+				timer.StopTimer("Bootstrap Destroy")
 
 				err = waitForInstallComplete(ctx, config, rootOpts.dir)
 				if err != nil {
@@ -126,6 +130,8 @@ var (
 					}
 					logrus.Fatal(err)
 				}
+				timer.StopTimer(timer.TotalTimeElapsed)
+				timer.LogSummary()
 			},
 		},
 		assets: targetassets.Cluster,
@@ -182,6 +188,8 @@ func runTargetCmd(targets ...asset.WritableAsset) func(cmd *cobra.Command, args 
 	}
 
 	return func(cmd *cobra.Command, args []string) {
+		timer.StartTimer(timer.TotalTimeElapsed)
+
 		cleanup := setupFileHook(rootOpts.dir)
 		defer cleanup()
 
@@ -200,13 +208,9 @@ func addRouterCAToClusterCA(config *rest.Config, directory string) (err error) {
 	}
 
 	// Configmap may not exist. log and accept not-found errors with configmap.
-	caConfigMap, err := client.CoreV1().ConfigMaps("openshift-config-managed").Get("router-ca", metav1.GetOptions{})
+	caConfigMap, err := client.CoreV1().ConfigMaps("openshift-config-managed").Get("default-ingress-cert", metav1.GetOptions{})
 	if err != nil {
-		if apierrors.IsNotFound(err) {
-			logrus.Infof("router-ca resource not found in cluster, perhaps you are not using default router CA")
-			return nil
-		}
-		return errors.Wrap(err, "fetching router-ca configmap from openshift-config-managed namespace")
+		return errors.Wrap(err, "fetching default-ingress-cert configmap from openshift-config-managed namespace")
 	}
 
 	routerCrtBytes := []byte(caConfigMap.Data["ca-bundle.crt"])
@@ -230,7 +234,7 @@ func addRouterCAToClusterCA(config *rest.Config, directory string) (err error) {
 			return errors.New("cluster CA found in kubeconfig not valid PEM format")
 		}
 		if !certPool.AppendCertsFromPEM(routerCrtBytes) {
-			return errors.New("ca-bundle.crt from router-ca configmap not valid PEM format")
+			return errors.New("ca-bundle.crt from default-ingress-cert configmap not valid PEM format")
 		}
 
 		newCA := append(routerCrtBytes, clusterCABytes...)
@@ -254,6 +258,7 @@ func waitForBootstrapComplete(ctx context.Context, config *rest.Config, director
 
 	apiTimeout := 20 * time.Minute
 	logrus.Infof("Waiting up to %v for the Kubernetes API at %s...", apiTimeout, config.Host)
+
 	apiContext, cancel := context.WithTimeout(ctx, apiTimeout)
 	defer cancel()
 	// Poll quickly so we notice changes, but only log when the response
@@ -262,12 +267,16 @@ func waitForBootstrapComplete(ctx context.Context, config *rest.Config, director
 	logDownsample := 15
 	silenceRemaining := logDownsample
 	previousErrorSuffix := ""
+	timer.StartTimer("API")
+	var lastErr error
 	wait.Until(func() {
 		version, err := discovery.ServerVersion()
 		if err == nil {
 			logrus.Infof("API %s up", version)
+			timer.StopTimer("API")
 			cancel()
 		} else {
+			lastErr = err
 			silenceRemaining--
 			chunks := strings.Split(err.Error(), ":")
 			errorSuffix := chunks[len(chunks)-1]
@@ -283,6 +292,9 @@ func waitForBootstrapComplete(ctx context.Context, config *rest.Config, director
 	}, 2*time.Second, apiContext.Done())
 	err = apiContext.Err()
 	if err != nil && err != context.Canceled {
+		if lastErr != nil {
+			return errors.Wrap(lastErr, "failed waiting for Kubernetes API")
+		}
 		return errors.Wrap(err, "waiting for Kubernetes API")
 	}
 
@@ -352,6 +364,7 @@ func waitForInitializedCluster(ctx context.Context, config *rest.Config) error {
 	defer cancel()
 
 	failing := configv1.ClusterStatusConditionType("Failing")
+	timer.StartTimer("Cluster Operators")
 	var lastError string
 	_, err = clientwatch.UntilWithSync(
 		clusterVersionContext,
@@ -367,6 +380,7 @@ func waitForInitializedCluster(ctx context.Context, config *rest.Config) error {
 					return false, nil
 				}
 				if cov1helpers.IsStatusConditionTrue(cv.Status.Conditions, configv1.OperatorAvailable) {
+					timer.StopTimer("Cluster Operators")
 					return true, nil
 				}
 				if cov1helpers.IsStatusConditionTrue(cv.Status.Conditions, failing) {
@@ -418,6 +432,7 @@ func waitForConsole(ctx context.Context, config *rest.Config, directory string) 
 	// no route in a row (to show we're still alive).
 	logDownsample := 15
 	silenceRemaining := logDownsample
+	timer.StartTimer("Console")
 	wait.Until(func() {
 		consoleRoutes, err := rc.RouteV1().Routes(consoleNamespace).List(metav1.ListOptions{})
 		if err == nil && len(consoleRoutes.Items) > 0 {
@@ -450,6 +465,7 @@ func waitForConsole(ctx context.Context, config *rest.Config, directory string) 
 	if url == "" {
 		return url, errors.New("could not get openshift-console URL")
 	}
+	timer.StopTimer("Console")
 	return url, nil
 }
 
@@ -468,7 +484,7 @@ func logComplete(directory, consoleURL string) error {
 	logrus.Info("Install complete!")
 	logrus.Infof("To access the cluster as the system:admin user when using 'oc', run 'export KUBECONFIG=%s'", kubeconfig)
 	logrus.Infof("Access the OpenShift web-console here: %s", consoleURL)
-	logrus.Infof("Login to the console with user: kubeadmin, password: %s", pw)
+	logrus.Infof("Login to the console with user: %q, and password: %q", "kubeadmin", pw)
 	return nil
 }
 

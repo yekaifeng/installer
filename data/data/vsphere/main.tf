@@ -1,4 +1,15 @@
+locals {
+  folder = var.vsphere_preexisting_folder ? var.vsphere_folder : vsphere_folder.folder[0].path
+}
+
 provider "vsphere" {
+  user                 = var.vsphere_username
+  password             = var.vsphere_password
+  vsphere_server       = var.vsphere_url
+  allow_unverified_ssl = false
+}
+
+provider "vsphereprivate" {
   user                 = var.vsphere_username
   password             = var.vsphere_password
   vsphere_server       = var.vsphere_url
@@ -25,8 +36,19 @@ data "vsphere_network" "network" {
 }
 
 data "vsphere_virtual_machine" "template" {
-  name          = var.vsphere_template
+  name          = vsphereprivate_import_ova.import.name
   datacenter_id = data.vsphere_datacenter.datacenter.id
+}
+
+resource "vsphereprivate_import_ova" "import" {
+  name       = var.vsphere_template
+  filename   = var.vsphere_ova_filepath
+  cluster    = var.vsphere_cluster
+  datacenter = var.vsphere_datacenter
+  datastore  = var.vsphere_datastore
+  network    = var.vsphere_network
+  folder     = local.folder
+  tag        = vsphere_tag.tag.id
 }
 
 resource "vsphere_tag_category" "category" {
@@ -48,6 +70,8 @@ resource "vsphere_tag" "tag" {
 }
 
 resource "vsphere_folder" "folder" {
+  count = var.vsphere_preexisting_folder ? 0 : 1
+
   path          = var.vsphere_folder
   type          = "vm"
   datacenter_id = data.vsphere_datacenter.datacenter.id
@@ -61,7 +85,7 @@ module "bootstrap" {
   ignition      = var.ignition_bootstrap
   resource_pool = data.vsphere_compute_cluster.cluster.resource_pool_id
   datastore     = data.vsphere_datastore.datastore.id
-  folder        = vsphere_folder.folder.path
+  folder        = local.folder
   network       = data.vsphere_network.network.id
   datacenter    = data.vsphere_datacenter.datacenter.id
   template      = data.vsphere_virtual_machine.template.id
@@ -83,7 +107,7 @@ module "master" {
 
   resource_pool = data.vsphere_compute_cluster.cluster.resource_pool_id
   datastore     = data.vsphere_datastore.datastore.id
-  folder        = vsphere_folder.folder.path
+  folder        = local.folder
   network       = data.vsphere_network.network.id
   datacenter    = data.vsphere_datacenter.datacenter.id
   template      = data.vsphere_virtual_machine.template.id

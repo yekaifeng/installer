@@ -50,16 +50,18 @@ In order to run the latest version of the installer in OpenStack, at a bare mini
 
 For a successful installation it is required:
 
-- Floating IPs: 2
+- Floating IPs: 2 (plus one that will be created and destroyed by the Installer during the installation process)
 - Security Groups: 3
 - Security Group Rules: 60
 - Routers: 1
 - Subnets: 1
+- Server Groups: 1
 - RAM: 112 GB
 - vCPUs: 28
 - Volume Storage: 175 GB
 - Instances: 7
 - Depending on the type of [image registry backend](#image-registry-requirements) either 1 Swift container or an additional 100 GB volume.
+- OpenStack resource tagging
 
 You may need to increase the security group related quotas from their default values. For example (as an OpenStack administrator):
 
@@ -71,9 +73,13 @@ openstack quota set --secgroups 8 --secgroup-rules 100 <project>`
 
 The default deployment stands up 3 master nodes, which is the minimum amount required for a cluster. For each master node you stand up, you will need 1 instance, and 1 port available in your quota. They should be assigned a flavor with at least 16 GB RAM, 4 vCPUs, and 25 GB Disk. It is theoretically possible to run with a smaller flavor, but be aware that if it takes too long to stand up services, or certain essential services crash, the installer could time out, leading to a failed install.
 
+The Master Nodes are placed in a single Server Group with "soft anti-affinity" policy; the machines will therefore be creted on separate hosts when possible.
+
 ### Worker Nodes
 
-The default deployment stands up 3 worker nodes. In our testing we determined that 2 was the minimum number of workers you could have to get a successful install, but we don't recommend running with that few. Worker nodes host the applications you run on OpenShift, so it is in your best interest to have more of them. See [here](https://docs.openshift.com/enterprise/3.0/architecture/infrastructure_components/kubernetes_infrastructure.html#node) for more information. The flavor assigned to the worker nodes should have at least 2 vCPUs, 8 GB RAM and 25 GB Disk. However, if you are experiencing `Out Of Memory` issues, or your installs are timing out, you should increase the size of your flavor to match the masters: 4 vCPUs and 16 GB RAM.
+The default deployment stands up 3 worker nodes. Worker nodes host the applications you run on OpenShift. The flavor assigned to the worker nodes should have at least 2 vCPUs, 8 GB RAM and 25 GB Disk. However, if you are experiencing `Out Of Memory` issues, or your installs are timing out, try increasing the size of your flavor to match the master nodes: 4 vCPUs and 16 GB RAM.
+
+See the [OpenShift documentation](https://docs.openshift.com/container-platform/4.4/architecture/control-plane.html#defining-workers_control-plane) for more information on the worker nodes.
 
 ### Bootstrap Node
 
@@ -215,13 +221,13 @@ sudo cp ca.crt.pem /etc/pki/ca-trust/source/anchors/
 sudo update-ca-trust extract
 ```
 
-Next, you should add the `cacert` key to your `clouds.yaml`. Its value should be a valid path to your CA cert that does not require root privilege to read.
+Next, you should add the `cacert` key to your `clouds.yaml`. Its value should be a valid path to your CA cert that does not require root privilege to read. The path can be either absolute, or relative to the current working directory while running the installer.
 
 ```yaml
 clouds:
   shiftstack:
     auth: ...
-    cacert: "ca.crt.pem"
+    cacert: "/etc/pki/ca-trust/source/anchors/ca.crt.pem"
 ```
 
 ## Standalone Single-Node Development Environment
@@ -338,7 +344,7 @@ This assumes the floating IP and corresponding `*.apps` DNS record exists.
 
 If you cannot or don't want to pre-create a floating IP address, the installation should still succeed, however the installer will fail waiting for the API.
 
-**WARNING:** The installer will fail if it can't reach the bootstrap OpenShift API in 30 minutes.
+**WARNING:** The installer will fail if it can't reach the bootstrap OpenShift API in 20 minutes.
 
 Even if the installer times out, the OpenShift cluster should still come up. Once the bootstrapping process is in place, it should all run to completion. So you should be able to deploy OpenShift without any floating IP addresses and DNS records and create everything yourself after the cluster is up.
 
@@ -506,7 +512,7 @@ curl https://<loadbalancer ip>:22623/config/master --insecure
 If you ran the installer with a [custom CA certificate](#self-signed-openstack-ca-certificates), then this certificate can be changed while the cluster is running. To change your certificate, edit the value of the `ca-cert.pem` key in the `cloud-provider-config` configmap with a valid PEM certificate.
 
 ```sh
-oc edit -n openshift-config cloud-provider-config
+oc edit configmap -n openshift-config cloud-provider-config
 ```
 
 ## Reporting Issues

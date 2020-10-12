@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/ghodss/yaml"
 	baremetalapi "github.com/metal3-io/cluster-api-provider-baremetal/pkg/apis"
@@ -17,14 +18,14 @@ import (
 	ovirtprovider "github.com/openshift/cluster-api-provider-ovirt/pkg/apis/ovirtprovider/v1beta1"
 	machineapi "github.com/openshift/cluster-api/pkg/apis/machine/v1beta1"
 	vsphereapi "github.com/openshift/machine-api-operator/pkg/apis/vsphereprovider"
-	vsphereprovider "github.com/openshift/machine-api-operator/pkg/apis/vsphereprovider/v1alpha1"
+	vsphereprovider "github.com/openshift/machine-api-operator/pkg/apis/vsphereprovider/v1beta1"
 	mcfgv1 "github.com/openshift/machine-config-operator/pkg/apis/machineconfiguration.openshift.io/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	awsapi "sigs.k8s.io/cluster-api-provider-aws/pkg/apis"
-	awsprovider "sigs.k8s.io/cluster-api-provider-aws/pkg/apis/awsproviderconfig/v1beta1"
+	awsprovider "sigs.k8s.io/cluster-api-provider-aws/pkg/apis/awsprovider/v1beta1"
 	azureapi "sigs.k8s.io/cluster-api-provider-azure/pkg/apis"
 	azureprovider "sigs.k8s.io/cluster-api-provider-azure/pkg/apis/azureprovider/v1beta1"
 	openstackapi "sigs.k8s.io/cluster-api-provider-openstack/pkg/apis"
@@ -159,6 +160,14 @@ func (m *Master) Generate(dependencies asset.Parents) error {
 		}
 
 		mpool := defaultAWSMachinePoolPlatform()
+
+		osImage := strings.SplitN(string(*rhcosImage), ",", 2)
+		osImageID := osImage[0]
+		if len(osImage) == 2 {
+			osImageID = "" // the AMI will be generated later on
+		}
+		mpool.AMIID = osImageID
+
 		mpool.Set(ic.Platform.AWS.DefaultMachinePlatform)
 		mpool.Set(pool.Platform.AWS)
 		if len(mpool.Zones) == 0 {
@@ -187,7 +196,6 @@ func (m *Master) Generate(dependencies asset.Parents) error {
 			installConfig.Config.Platform.AWS.Region,
 			subnets,
 			pool,
-			string(*rhcosImage),
 			"master",
 			"master-user-data",
 			installConfig.Config.Platform.AWS.UserTags,
@@ -253,6 +261,7 @@ func (m *Master) Generate(dependencies asset.Parents) error {
 				mpool.Zones = []string{""}
 			}
 		}
+
 		pool.Platform.Azure = &mpool
 
 		machines, err = azure.Machines(clusterID.InfraID, ic, pool, string(*rhcosImage), "master", "master-user-data")
@@ -311,7 +320,11 @@ func (m *Master) Generate(dependencies asset.Parents) error {
 		}
 	case ovirttypes.Name:
 		mpool := defaultOvirtMachinePoolPlatform()
+		mpool.VMType = ovirttypes.VMTypeHighPerformance
+		mpool.Set(ic.Platform.Ovirt.DefaultMachinePlatform)
+		mpool.Set(pool.Platform.Ovirt)
 		pool.Platform.Ovirt = &mpool
+
 		imageName, _ := rhcosutils.GenerateOpenStackImageName(string(*rhcosImage), clusterID.InfraID)
 
 		machines, err = ovirt.Machines(clusterID.InfraID, ic, pool, imageName, "master", "master-user-data")
@@ -325,8 +338,9 @@ func (m *Master) Generate(dependencies asset.Parents) error {
 		mpool.Set(ic.Platform.VSphere.DefaultMachinePlatform)
 		mpool.Set(pool.Platform.VSphere)
 		pool.Platform.VSphere = &mpool
+		templateName := clusterID.InfraID + "-rhcos"
 
-		machines, err = vsphere.Machines(clusterID.InfraID, ic, pool, string(*rhcosImage), "master", "master-user-data")
+		machines, err = vsphere.Machines(clusterID.InfraID, ic, pool, templateName, "master", "master-user-data")
 		if err != nil {
 			return errors.Wrap(err, "failed to create master machine objects")
 		}

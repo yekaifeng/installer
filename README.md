@@ -12,13 +12,15 @@
 * [Libvirt with KVM](docs/dev/libvirt/README.md) (development only)
 * [OpenStack](docs/user/openstack/README.md)
 * [OpenStack (UPI) (Experimental)](docs/user/openstack/install_upi.md)
-* [vSphere](docs/user/vsphere/install_upi.md)
+* [oVirt](docs/user/ovirt/install_ipi.md)
+* [vSphere](docs/user/vsphere/README.md)
+* [vSphere (UPI)](docs/user/vsphere/install_upi.md)
 
 ## Quick Start
 
 First, install all [build dependencies](docs/dev/dependencies.md).
 
-Clone this repository to `src/github.com/openshift/installer` in your [GOPATH](https://golang.org/cmd/go/#hdr-GOPATH_environment_variable). Then build the `openshift-install` binary with:
+Clone this repository. Then build the `openshift-install` binary with:
 
 ```sh
 hack/build.sh

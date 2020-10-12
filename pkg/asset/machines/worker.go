@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/ghodss/yaml"
 	baremetalapi "github.com/metal3-io/cluster-api-provider-baremetal/pkg/apis"
@@ -22,7 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	awsapi "sigs.k8s.io/cluster-api-provider-aws/pkg/apis"
-	awsprovider "sigs.k8s.io/cluster-api-provider-aws/pkg/apis/awsproviderconfig/v1beta1"
+	awsprovider "sigs.k8s.io/cluster-api-provider-aws/pkg/apis/awsprovider/v1beta1"
 	azureapi "sigs.k8s.io/cluster-api-provider-azure/pkg/apis"
 	azureprovider "sigs.k8s.io/cluster-api-provider-azure/pkg/apis/azureprovider/v1beta1"
 	openstackapi "sigs.k8s.io/cluster-api-provider-openstack/pkg/apis"
@@ -87,6 +88,7 @@ func defaultAzureMachinePoolPlatform() azuretypes.MachinePool {
 	return azuretypes.MachinePool{
 		OSDisk: azuretypes.OSDisk{
 			DiskSizeGB: 128,
+			DiskType:   "Premium_LRS",
 		},
 	}
 }
@@ -94,6 +96,10 @@ func defaultAzureMachinePoolPlatform() azuretypes.MachinePool {
 func defaultGCPMachinePoolPlatform() gcptypes.MachinePool {
 	return gcptypes.MachinePool{
 		InstanceType: "n1-standard-4",
+		OSDisk: gcptypes.OSDisk{
+			DiskSizeGB: 128,
+			DiskType:   "pd-ssd",
+		},
 	}
 }
 
@@ -108,7 +114,17 @@ func defaultBareMetalMachinePoolPlatform() baremetaltypes.MachinePool {
 }
 
 func defaultOvirtMachinePoolPlatform() ovirttypes.MachinePool {
-	return ovirttypes.MachinePool{}
+	return ovirttypes.MachinePool{
+		CPU: &ovirttypes.CPU{
+			Cores:   4,
+			Sockets: 1,
+		},
+		MemoryMB: 16348,
+		OSDisk: &ovirttypes.Disk{
+			SizeGB: 120,
+		},
+		VMType: ovirttypes.VMTypeServer,
+	}
 }
 
 func defaultVSphereMachinePoolPlatform() vspheretypes.MachinePool {
@@ -195,6 +211,14 @@ func (w *Worker) Generate(dependencies asset.Parents) error {
 			}
 
 			mpool := defaultAWSMachinePoolPlatform()
+
+			osImage := strings.SplitN(string(*rhcosImage), ",", 2)
+			osImageID := osImage[0]
+			if len(osImage) == 2 {
+				osImageID = "" // the AMI will be generated later on
+			}
+			mpool.AMIID = osImageID
+
 			mpool.Set(ic.Platform.AWS.DefaultMachinePlatform)
 			mpool.Set(pool.Platform.AWS)
 			if len(mpool.Zones) == 0 {
@@ -222,7 +246,6 @@ func (w *Worker) Generate(dependencies asset.Parents) error {
 				installConfig.Config.Platform.AWS.Region,
 				subnets,
 				&pool,
-				string(*rhcosImage),
 				"worker",
 				"worker-user-data",
 				installConfig.Config.Platform.AWS.UserTags,
@@ -322,8 +345,9 @@ func (w *Worker) Generate(dependencies asset.Parents) error {
 			mpool.Set(ic.Platform.VSphere.DefaultMachinePlatform)
 			mpool.Set(pool.Platform.VSphere)
 			pool.Platform.VSphere = &mpool
+			templateName := clusterID.InfraID + "-rhcos"
 
-			sets, err := vsphere.MachineSets(clusterID.InfraID, ic, &pool, string(*rhcosImage), "worker", "worker-user-data")
+			sets, err := vsphere.MachineSets(clusterID.InfraID, ic, &pool, templateName, "worker", "worker-user-data")
 			if err != nil {
 				return errors.Wrap(err, "failed to create worker machine objects")
 			}
@@ -331,8 +355,13 @@ func (w *Worker) Generate(dependencies asset.Parents) error {
 				machineSets = append(machineSets, set)
 			}
 		case ovirttypes.Name:
-			pool.Platform.Ovirt = &ovirttypes.MachinePool{}
+			mpool := defaultOvirtMachinePoolPlatform()
+			mpool.Set(ic.Platform.Ovirt.DefaultMachinePlatform)
+			mpool.Set(pool.Platform.Ovirt)
+			pool.Platform.Ovirt = &mpool
+
 			imageName, _ := rhcosutils.GenerateOpenStackImageName(string(*rhcosImage), clusterID.InfraID)
+
 			sets, err := ovirt.MachineSets(clusterID.InfraID, ic, &pool, imageName, "worker", "worker-user-data")
 			if err != nil {
 				return errors.Wrap(err, "failed to create worker machine objects for ovirt provider")

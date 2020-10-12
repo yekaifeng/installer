@@ -1,5 +1,8 @@
 locals {
   nodes_cidr_block = var.cidr_block
+  nodes_subnet_id  = var.machines_subnet_id != "" ? var.machines_subnet_id : openstack_networking_subnet_v2.nodes[0].id
+  nodes_network_id = var.machines_network_id != "" ? var.machines_network_id : openstack_networking_network_v2.openshift-private[0].id
+  create_router    = var.machines_subnet_id != "" ? 0 : 1
 }
 
 data "openstack_networking_network_v2" "external_network" {
@@ -9,27 +12,27 @@ data "openstack_networking_network_v2" "external_network" {
 }
 
 resource "openstack_networking_network_v2" "openshift-private" {
+  count          = var.machines_subnet_id == "" ? 1 : 0
   name           = "${var.cluster_id}-openshift"
   admin_state_up = "true"
-  tags           = ["openshiftClusterID=${var.cluster_id}"]
+  tags           = ["openshiftClusterID=${var.cluster_id}", "${var.cluster_id}-primaryClusterNetwork"]
 }
 
 resource "openstack_networking_subnet_v2" "nodes" {
+  count           = var.machines_subnet_id == "" ? 1 : 0
   name            = "${var.cluster_id}-nodes"
   cidr            = local.nodes_cidr_block
   ip_version      = 4
-  network_id      = openstack_networking_network_v2.openshift-private.id
+  network_id      = local.nodes_network_id
   tags            = ["openshiftClusterID=${var.cluster_id}"]
   dns_nameservers = var.external_dns
 
   # We reserve some space at the beginning of the CIDR to use for the VIPs
-  # It would be good to make this more dynamic by calculating the number of
-  # addresses in the provided CIDR. This currently assumes at least a /18.
   # FIXME(mandre) if we let the ports pick up VIPs automatically, we don't have
   # to do any of this.
   allocation_pool {
     start = cidrhost(local.nodes_cidr_block, 10)
-    end   = cidrhost(local.nodes_cidr_block, 16000)
+    end   = cidrhost(local.nodes_cidr_block, pow(2, (32 - split("/", local.nodes_cidr_block)[1])) - 2)
   }
 }
 
@@ -38,7 +41,7 @@ resource "openstack_networking_port_v2" "masters" {
   count = var.masters_count
 
   admin_state_up     = "true"
-  network_id         = openstack_networking_network_v2.openshift-private.id
+  network_id         = local.nodes_network_id
   security_group_ids = [openstack_networking_secgroup_v2.master.id]
   tags               = ["openshiftClusterID=${var.cluster_id}"]
 
@@ -48,7 +51,7 @@ resource "openstack_networking_port_v2" "masters" {
   }
 
   fixed_ip {
-    subnet_id = openstack_networking_subnet_v2.nodes.id
+    subnet_id = local.nodes_subnet_id
   }
 
   allowed_address_pairs {
@@ -62,19 +65,20 @@ resource "openstack_networking_port_v2" "masters" {
   allowed_address_pairs {
     ip_address = var.ingress_ip
   }
+
+  depends_on = [openstack_networking_port_v2.api_port, openstack_networking_port_v2.ingress_port]
 }
 
 resource "openstack_networking_port_v2" "api_port" {
   name = "${var.cluster_id}-api-port"
 
   admin_state_up     = "true"
-  network_id         = openstack_networking_network_v2.openshift-private.id
+  network_id         = local.nodes_network_id
   security_group_ids = [openstack_networking_secgroup_v2.master.id]
   tags               = ["openshiftClusterID=${var.cluster_id}"]
 
   fixed_ip {
-    subnet_id = openstack_networking_subnet_v2.nodes.id
-    # FIXME(mandre) we could let the installer automatically pick up the address
+    subnet_id  = local.nodes_subnet_id
     ip_address = var.api_int_ip
   }
 }
@@ -83,13 +87,12 @@ resource "openstack_networking_port_v2" "ingress_port" {
   name = "${var.cluster_id}-ingress-port"
 
   admin_state_up     = "true"
-  network_id         = openstack_networking_network_v2.openshift-private.id
+  network_id         = local.nodes_network_id
   security_group_ids = [openstack_networking_secgroup_v2.worker.id]
   tags               = ["openshiftClusterID=${var.cluster_id}"]
 
   fixed_ip {
-    subnet_id = openstack_networking_subnet_v2.nodes.id
-    # FIXME(mandre) we could let the installer automatically pick up the address
+    subnet_id  = local.nodes_subnet_id
     ip_address = var.ingress_ip
   }
 }
@@ -123,9 +126,11 @@ resource "openstack_networking_floatingip_associate_v2" "api_fip" {
   count       = length(var.lb_floating_ip) == 0 ? 0 : 1
   port_id     = openstack_networking_port_v2.api_port.id
   floating_ip = var.lb_floating_ip
+  depends_on  = [openstack_networking_router_interface_v2.nodes_router_interface]
 }
 
 resource "openstack_networking_router_v2" "openshift-external-router" {
+  count               = local.create_router
   name                = "${var.cluster_id}-external-router"
   admin_state_up      = true
   external_network_id = data.openstack_networking_network_v2.external_network.id
@@ -133,7 +138,7 @@ resource "openstack_networking_router_v2" "openshift-external-router" {
 }
 
 resource "openstack_networking_router_interface_v2" "nodes_router_interface" {
-  router_id = openstack_networking_router_v2.openshift-external-router.id
-  subnet_id = openstack_networking_subnet_v2.nodes.id
+  count     = local.create_router
+  router_id = openstack_networking_router_v2.openshift-external-router[0].id
+  subnet_id = local.nodes_subnet_id
 }
-
